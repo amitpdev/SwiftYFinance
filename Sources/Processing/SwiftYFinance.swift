@@ -18,7 +18,6 @@ public class SwiftYFinance {
      The framework fetches it during the first use.
      */
     static var crumb: String = ""
-    static var cookies: String = ""
 
     /**
      The counter of requests. This parameter is added to the urls to change them as, sometimes, caching of content does a bad thing.
@@ -46,7 +45,7 @@ public class SwiftYFinance {
     static var session: Session = {
         let configuration = Session.default.sessionConfiguration
         //        configuration.waitsForConnectivity = false
-        configuration.httpShouldSetCookies = false
+        configuration.httpShouldSetCookies = true
         configuration.requestCachePolicy = .reloadIgnoringCacheData
 
         configuration.httpCookieStorage?.cookieAcceptPolicy = .always
@@ -69,37 +68,45 @@ public class SwiftYFinance {
         //
         //        semaphore.wait()
 
+        let headers: HTTPHeaders = [
+            "sec-ch-ua": "Not A(Brand\";v=\"99\", \"Google Chrome\";v=\"121\", \"Chromium\";v=\"121\"",
+            "sec-ch-ua-mobile": "?0",
+            "sec-ch-ua-platform": "macOS",
+            "upgrade-insecure-requests": "1",
+            "user-agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36",
+            "accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
+            "sec-fetch-site": "none",
+            "sec-fetch-mode": "navigate",
+            "sec-fetch-user": "?1",
+            "sec-fetch-dest": "document",
+            "accept-encoding": "gzip, deflate, br",
+            "accept-language": "en-US,en;q=0.9"
+        ]
+        
         session
-            .request("https://finance.yahoo.com/quote/AAPL/history")
+            .request("https://finance.yahoo.com/quote/AAPL/history", headers: headers)
             .response(queue: .global(qos: .userInteractive)) {
                 response in
                 defer {
                     semaphore.signal()
                 }
                 
-                Self.cookies = response.response?.headers["Set-Cookie"] ?? ""
-                if response.data == nil {
-                    return
-                }
-
                 let data = String(data: response.data!, encoding: .utf8)
                 guard let data = data else {
                     return
                 }
+                
+                let pattern = #"\"crumb\":\s*\"(?<crumb>[^\"]+)\""#
 
-                let pattern = #""CrumbStore":\{"crumb":"(?<crumb>[^"]+)"\}"#
                 let range = NSRange(location: 0, length: data.utf16.count)
                 guard let regex = try? NSRegularExpression(pattern: pattern, options: []),
                       let match = regex.firstMatch(in: data, options: [], range: range),
-                      let rangeData = Range(match.range, in: data) else {
+                      let rangeData = Range(match.range(withName: "crumb"), in: data) else {
                     return
                 }
-                let crumbStr = String(data[rangeData])
 
-                let wI = NSMutableString( string: crumbStr )
-                CFStringTransform( wI, nil, "Any-Hex/Java" as NSString, true )
-                let decodedStr = wI as String
-                Self.crumb = String(decodedStr.suffix(13).prefix(11))
+                let crumb = String(data[rangeData])
+                Self.crumb = crumb
             }
 
         semaphore.wait()
@@ -464,6 +471,51 @@ public class SwiftYFinance {
         }
     }
 
+    /**
+     Fetches the most recent quote for multiple stocks by their given symbols.
+     - Warning: Identifiers must exist or data will be nil and error will be setten
+     - Parameters:
+     - identifiers: List of symbols
+     - queue: queue to use for request asyncgtonous processing
+     - callback: callback, two parameters will be passed
+     */
+    public class func quote(identifiers: [String], queue: DispatchQueue = .main, callback: @escaping ([QuoteResult]?, Error?) -> Void) {
+        Self.prepareCredentials()
+        var urlComponents = URLComponents()
+        urlComponents.scheme = "https"
+        urlComponents.host = "query1.finance.yahoo.com"
+        urlComponents.path = "/v7/finance/quote"
+        Self.cacheCounter += 1
+        urlComponents.queryItems = [
+            URLQueryItem(name: "symbols", value: identifiers.joined(separator:",")),
+            URLQueryItem(name: "region", value: "US"),
+            URLQueryItem(name: "lang", value: "en-US"),
+            URLQueryItem(name: "corsDomain", value: "finance.yahoo.com"),
+            URLQueryItem(name: "crumb", value: Self.crumb),
+            URLQueryItem(name: "cachecounter", value: String(Self.cacheCounter))
+        ]
+
+        session.request(urlComponents, headers: Self.headers).responseData(queue: queue) { response in
+            if let error = response.error {
+                callback(nil, error)
+                return
+            }
+            guard let data = response.data else {
+                callback(nil, NSError(domain: "Data is nil", code: -1, userInfo: nil))
+                return
+            }
+
+            do {
+                let decoder = JSONDecoder()
+                let quoteResponse = try decoder.decode(QuoteResponse.self, from: data)
+                callback(quoteResponse.quoteResponse.result, nil)
+            } catch {
+                callback(nil, error)
+            }
+        }
+    }
+    
+    
     /**
      The same as `SwiftYFinance.recentDataBy(...)` except that it executes synchronously and returns data rather than giving it to the callback.
      */
